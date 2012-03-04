@@ -1,0 +1,23 @@
+Author: Simon Kowallik <sk simonkowallik.com>
+
+
+Description
+===========
+This is my collection of iRules for F5 BIGIP Devices.
+
+More Details are available on http://devcentral.f5.com
+
+
+iRules
+======
+
+* HashDoS_Defender - Advanced Protection against hash collision attacks (for ASP.NET, PHP and Java/JSP) *
+
+This iRule protects against Hash collision "HashDoS" Attacks through HTTP POST Parameters. If you can't limit your HTTP POST size and/or Parameter count for your vulnerable Web Application, this iRule is for you!
+
+The following Hash functions are protected:
+1. djb x33a used by PHP5
+2. djb x33x used by ASP.NET and PHP4
+3. "x31s" (similar to x33a) used by Java/JSP like Tomcat, Geronimo or Oracle Glassfish 
+
+Link: https://devcentral.f5.com/wiki/iRules.HashDoS-Defender-Advanced-Protection-against-hash-collision-attacks-ASP-NET-PHP-Java-JSP.ashx?NS=iRules

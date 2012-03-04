@@ -1,0 +1,226 @@
+# iRule:   HashDoS_Defender
+# Author:  Simon Kowallik <sk @simonkowallik.com>
+# Version: 1.1
+#
+# Changes:
+# @2012-02-05: Version 1.0: First release
+# @2012-02-06: Version 1.1: Formating changes, variable name changes
+#                           HTTP 500 Error on collision detection with "DropID" to client
+#
+# Compatibility (Tested with):
+# - BIG-IP Version 10.1.0 3341.1084
+# - BIG-IP Version 10.2.2 969.0
+# - BIG-IP Version 10.2.3 123.0
+#
+# Applies to:
+# CERT: VU#903934 - http://www.kb.cert.org/vuls/id/903934
+# CVEs: CVE-2011-3414, CVE-2011-4885, CVE-2011-4858, CVE-2011-5034
+#
+# Description:
+# This iRule protects against Hash collision "HashDoS" Attacks through HTTP POST Parameters.
+# If you can't limit your HTTP POST size and/or Parameter count for your vulnerable
+# Web Application, this iRule is for you!
+#
+# The following Hash functions are protected:
+# - djb x33a used by PHP5
+# - djb x33x used by ASP.NET and PHP4
+# - "x31s" (similar to x33a) used by Java/JSP like Tomcat, Geronimo or Oracle Glassfish
+#
+# You can control the behavior by some configuration variables in the RULE_INIT block.
+#
+# Words of Warning:
+# While this iRule CAN protect your web applications, there are several attack vectors which this
+# iRule does not cover.
+#
+# And this iRule is not perfect, too.
+# While we handle some evasion techniques like sending POST Parameters in Uppercase, 
+# lowercase and Hex encoded, we do not inspect the whole data by default (::MaxLengthCollect).
+#
+# While you can set ::MaxLengthCollect to the same value as ::MaxLengthAllowed, 
+# it is still possible for an attacker to submit different collisions!
+# To detect collisions we only inspect two Parameters with this iRule, while an attacker can sent
+# 50k by default. If the attacker sents 2x25k collisions which differ, we might fail to detect
+# collisions at all.
+#
+# Counter measures? Yes.
+# 1. Set ::MaxLengthCollect to the same value as ::MaxLengthAllowed
+# 2. Inspect multiple POST Parameters, i.e. Parameter 1 each 1000 POST Parameters supplied
+#    (not implemented in this Version)
+# 3. Best: Patch your Application Servers with non-vulnerable "Web Application Framework" version
+#
+when RULE_INIT {
+  # Max Content-Length which will be collected by this iRule
+  set static::MaxLengthCollect 1048576
+  # Max Content-length allowed.
+  # Connection will be dropped if size sent is greater specified bytes
+  set static::MaxLengthAllowed 10485760
+  # Max HTTP POST Parameters allowed.
+  # Connection will be dropped if more Parameters are sent then specified
+  set static::MaxPostParameter 50000
+  # Post Parameters will be inspected for collisions starting from this count
+  set static::PostInspectStart 1000
+}
+when HTTP_REQUEST {
+  # Check for HTTP POST && Content-Length Header
+  if {[HTTP::method] eq "POST" && [HTTP::header exists Content-Length]} {
+    # if Content-Length > ::MaxLengthAllowed -> Drop
+    if {[HTTP::header Content-Length] > $static::MaxLengthAllowed} {
+      # You can choose between a simple TCP Connection Reset or a HTTP 500 Response with
+      # an individual "Internal Error nnnnnnn" message
+      # Please pay attention to the "DropID: $DropID" entry in the log command!
+      set DropID [expr { int(8999999 * rand() + 1000000) }]
+      HTTP::respond 500 content "Internal Error $DropID" noserver Connection close
+      #drop
+      log local0. "HashDoS Defender: HTTP connection dropped: \
+        Client: [IP::client_addr]:[TCP::client_port] \
+        DropID: $DropID \
+        Reason: POST size limit reached"
+    # if Content-Length > ::MaxLengthCollect just collect first MByte, else collect exact value
+    } elseif {[HTTP::header Content-Length] > $static::MaxLengthCollect} {
+      HTTP::collect $static::MaxLengthCollect
+      log local0. "HashDoS Defender: Warning: Collecting HTTP connection from \
+        Client: [IP::client_addr]:[TCP::client_port] \
+        Reason: Collecting only first $static::MaxLengthCollect Bytes"
+    } elseif {[HTTP::header Content-Length] > 0} {
+      HTTP::collect [HTTP::header Content-Length]
+    }
+  }
+}
+when HTTP_REQUEST_DATA {
+  # sanitize and split the HTTP Payload to 'ParameterName=Value' elements
+  set POST_array [split [regsub -all {&=|&$} [HTTP::payload] {}] "&"]
+  # calculate the length
+  set POST_count [llength $POST_array]
+  # Check if we have more elements then defined in ::MaxPostParameter, then drop.
+  if {$POST_count > $static::MaxPostParameter} {
+    # You can choose between a simple TCP Connection Reset or a HTTP 500 Response with
+    # an individual "Internal Error nnnnnnn" message
+    # Please pay attention to the "DropID: $DropID" entry in the log command!
+    set DropID [expr { int(8999999 * rand() + 1000000) }]
+    HTTP::respond 500 content "Internal Error $DropID" noserver Connection close
+     #drop
+    log local0. "HashDoS Defender: HTTP connection dropped: \
+                Client: [IP::client_addr]:[TCP::client_port] \
+                DropID: $DropID \
+                Reason: POST parameter limit reached"
+  # If we have more/equal amount of elements then defined in ::PostInspectStart,
+  # we will inspect them for collisions.
+  } elseif {$POST_count >= $static::PostInspectStart} {
+    # Post Parameter Inspection starts here..
+    # Set hash IVs
+    set hAx33a 5381
+    set hAx33a_UC 5381
+    set hAx33a_lc 5381
+    set hAx33x 5381
+    set hAx33x_UC 5381
+    set hAx33x_lc 5381
+    set hAx31s 0
+    set hAx31s_UC 0
+    set hAx31s_lc 0
+    set hBx33a 5381
+    set hBx33x 5381
+    set hBx31s 0
+    set hBx33a_UC 5381
+    set hBx33x_UC 5381
+    set hBx31s_UC 0
+    set hBx33a_lc 5381
+    set hBx33x_lc 5381
+    set hBx31s_lc 0
+    
+#[split[URI::decode[lindex[split[lindex $POST_array [expr {int($POST_count/3*rand())}]]=]0]] {}]
+# explanation:
+#           NUMBER  -> [expr {int($POST_count / 3 * rand())}]  Number in 1. third of $POST_count
+#  PARAMETER=VALUE  -> [lindex $POST_array NUMBER]      Extract Element # NUMBER from POST_array
+# {PARAMETER VALUE} -> [split PARAMETER=VALUE =]        Split to PARAMETER VALUE list
+#         PARAMETER -> [lindex {PARAMETER VALUE} 0]          Extract Element 0 which is PARAMETER
+#         PARAMETER -> [URI::decode PARAMETER]      URI decode PARAMETER, turn %xx to ascii char
+#    {P A R A M ..} -> [split PARAMETER {}]              iterate (foreach) every single character
+
+    # Inspect the first Parameter
+    foreach chr [split [URI::decode [lindex [split [lindex $POST_array [expr { int($POST_count / 3 * rand()) }]] =] 0]] {}] {
+      # Calculate hash values
+      binary scan $chr c chrInt
+      binary scan [string toupper $chr] c chrInt_UC
+      binary scan [string tolower $chr] c chrInt_lc
+      set hAx33a [expr { int(($hAx33a << 5)) + int($hAx33a) + $chrInt }]
+      set hAx33x [expr {(int(($hAx33x << 5)) + int($hAx33x)) ^ $chrInt}]
+      set hAx31s [expr { int(($hAx31s << 5)) - int($hAx31s) + $chrInt }]
+      set hAx33a_UC [expr { int(($hAx33a_UC << 5)) + int($hAx33a_UC) + $chrInt_UC }]
+      set hAx33x_UC [expr {(int(($hAx33x_UC << 5)) + int($hAx33x_UC)) ^ $chrInt_UC}]
+      set hAx31s_UC [expr { int(($hAx31s_UC << 5)) - int($hAx31s_UC) + $chrInt_UC }]
+      set hAx33a_lc [expr { int(($hAx33a_lc << 5)) + int($hAx33a_lc) + $chrInt_lc }]
+      set hAx33x_lc [expr {(int(($hAx33x_lc << 5)) + int($hAx33x_lc)) ^ $chrInt_lc}]
+      set hAx31s_lc [expr { int(($hAx31s_lc << 5)) - int($hAx31s_lc) + $chrInt_lc }]
+    }
+    # Inspect the second Parameter
+    foreach chr [split [URI::decode [lindex [split [lindex $POST_array [expr { int($POST_count / 2 * rand() + $POST_count / 3 + 1) }]] =] 0]] {}] {
+      # Calculate hash values
+      binary scan $chr c chrInt
+      binary scan [string toupper $chr] c chrInt_UC
+      binary scan [string tolower $chr] c chrInt_lc
+      set hBx33a [expr { int(($hBx33a << 5)) + int($hBx33a) + $chrInt }]
+      set hBx33x [expr {(int(($hBx33x << 5)) + int($hBx33x)) ^ $chrInt}]
+      set hBx31s [expr { int(($hBx31s << 5)) - int($hBx31s) + $chrInt }]
+      set hBx33a_UC [expr { int(($hBx33a_UC << 5)) + int($hBx33a_UC) + $chrInt_UC }]
+      set hBx33x_UC [expr {(int(($hBx33x_UC << 5)) + int($hBx33x_UC)) ^ $chrInt_UC}]
+      set hBx31s_UC [expr { int(($hBx31s_UC << 5)) - int($hBx31s_UC) + $chrInt_UC }]
+      set hBx33a_lc [expr { int(($hBx33a_lc << 5)) + int($hBx33a_lc) + $chrInt_lc }]
+      set hBx33x_lc [expr {(int(($hBx33x_lc << 5)) + int($hBx33x_lc)) ^ $chrInt_lc}]
+      set hBx31s_lc [expr { int(($hBx31s_lc << 5)) - int($hBx31s_lc) + $chrInt_lc }]
+    }
+    #log local0. "HashDoS Defender: DEBUG: djbX33A - PHP5 Protection:         ParamA -> \
+    #             orig($hAx33a) UC($hAx33a_UC) lc($hAx33a_lc)"
+    #log local0. "HashDoS Defender: DEBUG: djbX33A - PHP5 Protection:         ParamB -> \
+    #             orig($hBx33a) UC($hBx33a_UC) lc($hBx33a_lc)"
+    #log local0. "HashDoS Defender: DEBUG: djbX33X - PHP4+ASP.NET Protection: ParamA -> \
+    #             orig($hAx33x) UC($hAx33x_UC) lc($hAx33x_lc)"
+    #log local0. "HashDoS Defender: DEBUG: djbX33X - PHP4+ASP.NET Protection: ParamB -> \
+    #             orig($hBx33x) UC($hBx33x_UC) lc($hBx33x_lc)"
+    #log local0. "HashDoS Defender: DEBUG:    X31S - JSP/Tomcat Protection:   ParamA -> \
+    #             orig($hAx31s) UC($hAx31s_UC) lc($hAx31s_lc)"
+    #log local0. "HashDoS Defender: DEBUG:    X31S - JSP/Tomcat Protection:   ParamB -> \
+    #             orig($hBx31s) UC($hBx31s_UC) lc($hBx31s_lc)"
+    
+    # Check for collisions and take action
+    if {$hAx33a == $hBx33a || $hAx33a_UC == $hBx33a_UC || $hAx33a_lc == $hBx33a_lc} {
+      # x33a hash collision detected
+      #
+      # You can choose between a simple TCP Connection Reset or a HTTP 500 Response with
+      # an individual "Internal Error nnnnnnn" message
+      # Please pay attention to the "DropID: $DropID" entry in the log command!
+      set DropID [expr { int(8999999 * rand() + 1000000) }]
+      HTTP::respond 500 content "Internal Error $DropID" noserver Connection close
+      #drop
+      log local0. "HashDoS Defender: HTTP connection dropped: \
+        Client: [IP::client_addr]:[TCP::client_port] \
+        DropID: $DropID \
+        Reason: X33A (PHP5) hash collision detected"
+    } elseif {$hAx33x == $hBx33x || $hAx33x_UC == $hBx33x_UC || $hAx33x_lc == $hBx33x_lc} {
+      # x33x hash collision detected
+      #
+      # You can choose between a simple TCP Connection Reset or a HTTP 500 Response with
+      # an individual "Internal Error nnnnnnn" message
+      # Please pay attention to the "DropID: $DropID" entry in the log command!
+      set DropID [expr { int(8999999 * rand() + 1000000) }]
+      HTTP::respond 500 content "Internal Error $DropID" noserver Connection close
+      #drop
+      log local0. "HashDoS Defender: HTTP connection dropped: \
+        Client: [IP::client_addr]:[TCP::client_port] \
+        DropID: $DropID \
+        Reason: X33X (ASP.NET/PHP4) hash collision detected"
+    } elseif {$hAx31s == $hBx31s || $hAx31s_UC == $hBx31s_UC || $hAx31s_lc == $hBx31s_lc} {
+      # x31s hash collision detected
+      #
+      # You can choose between a simple TCP Connection Reset or a HTTP 500 Response with
+      # an individual "Internal Error nnnnnnn" message
+      # Please pay attention to the "DropID: $DropID" entry in the log command!
+      set DropID [expr { int(8999999 * rand() + 1000000) }]
+      HTTP::respond 500 content "Internal Error $DropID" noserver Connection close
+      #drop
+      log local0. "HashDoS Defender: HTTP connection dropped: \
+        Client: [IP::client_addr]:[TCP::client_port] \
+        DropID: $DropID \
+        Reason: X31S (Java/JSP) hash collision detected"
+    }
+  }
+}
