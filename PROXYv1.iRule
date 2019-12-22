@@ -1,0 +1,16 @@
+# proxy_v1
+# Author:  Simon Kowallik <github@simonkowallik.com>
+when CLIENT_ACCEPTED priority 500 {
+    TCP::collect
+}
+when CLIENT_DATA priority 500 {
+    if { [TCP::payload 0 5] eq {PROXY} } {
+        scan [TCP::payload] {PROXY TCP%s%s%s%s%s} version addr_src addr_dst port_src port_dst
+        TCP::payload replace 0 [expr {[string first "\r" [TCP::payload]] + 2}] {}
+
+        log local0.debug "Proxy Protocol v1 conn from [IP::client_addr]:[TCP::client_port] for original src: $addr_src:$port_src to dst: $addr_dst:$port_dst"
+        snat $addr_src $port_src
+    }
+    virtual VIRTUAL_SERVER
+    TCP::release
+}

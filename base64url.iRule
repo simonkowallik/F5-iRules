@@ -1,0 +1,14 @@
+proc base64url_encode {arg} {
+  # https://tools.ietf.org/html/rfc4648#page-7
+  # '+' -> '-'
+  # '/' -> '_'
+  # '=' -> '.'
+  return [string map [list {+} {-} {/} {_} {=} {.}] [b64encode $arg]]
+}
+proc base64url_decode {arg} {
+  # https://tools.ietf.org/html/rfc4648#page-7
+  # '-' -> '+'
+  # '/' -> '_'
+  # '.' -> '='
+  return [b64decode [string map [list {-} {+} {_} {/} {.} {=}] $arg]]
+}
