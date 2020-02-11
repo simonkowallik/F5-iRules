@@ -1,0 +1,104 @@
+# iRule: SameSiteNoneSecure
+# author: Simon Kowallik
+# version: 1.0
+#
+# what it does:
+# way back to status quo for the unprepared applications & sites
+# Setting SameSite=None+Secure for compatible user-agents,
+# not touching cookies for incompatible user-agents.
+#
+# RFC "standards"
+# https://tools.ietf.org/html/draft-west-cookie-incrementalism-00
+# https://tools.ietf.org/html/draft-ietf-httpbis-rfc6265bis-05
+# further reading:
+# https://web.dev/samesite-cookies-explained/
+# https://web.dev/samesite-cookie-recipes/
+# https://blog.chromium.org/2019/10/developers-get-ready-for-new.html
+# https://www.chromium.org/updates/same-site
+# https://www.chromium.org/updates/same-site/incompatible-clients
+
+proc checkSameSiteCompatible {useragent} {
+# usage: set isSameSiteCompatible [call checkSameSiteCompatible {User-Agent-String}]
+  # check for incompatible user-agents: https://www.chromium.org/updates/same-site/incompatible-clients
+  # based on https://devcentral.f5.com/s/articles/HTTP-cookie-SameSite-test-detection-of-browsers-with-incompatible-SameSite-None-handling
+  switch -glob -- [string tolower $useragent] {
+    {*chrome/5[1-9].[0-9]*} -
+    {*chrome/6[0-6].[0-9]*} -
+    {*chromium/5[1-9].[0-9]*} -
+    {*chromium/6[0-6].[0-9]*} -
+    {*ip?*; cpu *os 12*applewebkit*} -
+    {*macintosh;*mac os x 10_14*version*safari*} -
+    {mozilla*macintosh;*mac os x 10_14*applewebkit*khtml, like gecko*} {
+      # no samesite support
+      return 0
+    }
+    {*ucbrowser/*} {
+      switch -glob -- [string tolower $useragent] {
+        {*ucbrowser/[1-9].*} -
+        {*ucbrowser/1[0-1].*} -
+        {*ucbrowser/12.[0-9].*} -
+        {*ucbrowser/12.1[0-1].*} -
+        {*ucbrowser/12.12.*} -
+        {*ucbrowser/12.13.[0-2]*} {
+          # no samesite support
+          return 0
+        }
+      }
+    }
+  }
+  return 1
+  # CPU Cycles on Executing (>100k test runs)
+  #   Average                 22000-42000 (fastest to slowest path)
+  #   Maximum                214263
+  #   Minimum                 13763
+}
+
+# sample implementation
+when CLIENT_ACCEPTED priority 100 {
+  set _samesite_compatible {}
+  set _useragent {}
+  # needs to be enabled when using APM and MRHSession cookies should be rewritten
+  #ACCESS::restrict_irule_events disable
+}
+when HTTP_REQUEST priority 100 {
+  # enable as needed
+  # inspects user-agent once per TCP session (higher performance)
+  if { $_samesite_compatible eq {} } {
+    set _samesite_compatible [call checkSameSiteCompatible [HTTP::header value {User-Agent}]]
+  }
+#  # inspects user-agent for each HTTP request (eg for multplexed clientside connections)
+#  if { $_useragent ne [HTTP::header value {User-Agent}] } {
+#    set _useragent [HTTP::header value {User-Agent}]
+#    set _samesite_compatible [call checkSameSiteCompatible $_useragent]
+#  }
+}
+when HTTP_RESPONSE_RELEASE priority 900 {
+  if { $_samesite_compatible eq {1} } {
+    # user-agent is compatible with SameSite=None
+    # enable SameSite=None and Secure -> https://tools.ietf.org/html/draft-west-cookie-incrementalism-00#section-3.2
+
+    # enable as needed
+#    # match single cookie precisely
+#    set cookie {CookieName}
+#    if { [HTTP::cookie exists $cookie] } {
+#      HTTP::cookie attribute $cookie insert {SameSite} {None}
+#      HTTP::cookie secure $cookie enable
+#    }
+#    # match a cookie prefix (actual cookie name starts with this prefix)
+#    set cookie_prefix {BIGipServer}  # example: BIGipServer* BIG-IP persistence cookies
+#    foreach cookie [HTTP::cookie names] {
+#      if { $cookie starts_with $cookie_prefix } {
+#        HTTP::cookie attribute $cookie insert {SameSite} {None}
+#        HTTP::cookie secure $cookie enable
+#      }
+#    }
+#    # match a list of cookie names
+#    set cookie_list [list {MRHSession} {LastMRH_Session}]  # example: list of APM session cookies
+#    foreach cookie [HTTP::cookie names] {
+#      if { [lsearch -exact $cookie_list $cookie] ne "-1" } {
+#        HTTP::cookie attribute $cookie insert {SameSite} {None}
+#        HTTP::cookie secure $cookie enable
+#      }
+#    }
+  }
+}
